@@ -265,6 +265,7 @@ def call_zeroclaw_ws(message: str, session_id: str, from_user: str, chat_id: str
             # zeroclaw WebSocket 只发送 JSON 消息
             data = json_lib.loads(message)
             msg_type = data.get("type")
+            logger.debug(f"Received WebSocket message type: {msg_type}")
             
             if msg_type == "history":
                 # 连接建立时的历史记录，忽略
@@ -274,11 +275,14 @@ def call_zeroclaw_ws(message: str, session_id: str, from_user: str, chat_id: str
                 # 处理完成，包含完整响应
                 logger.info(f"WebSocket conversation completed for session {session_id}")
                 final_response = data.get("full_response", "").strip()
+                logger.info(f"Received full_response length: {len(final_response)} chars")
                 if final_response:
                     full_response.clear()
                     full_response.append(final_response)
+                    logger.info(f"Stored response: {final_response[:100]}...")
                 else:
                     logger.warning("Received done message without full_response")
+                    logger.debug(f"Done message data: {data}")
                 
             elif msg_type == "error":
                 # 错误消息
@@ -288,7 +292,8 @@ def call_zeroclaw_ws(message: str, session_id: str, from_user: str, chat_id: str
                 
             else:
                 # 未知消息类型
-                logger.debug(f"Received unknown message type: {msg_type}")
+                logger.warning(f"Received unknown message type: {msg_type}")
+                logger.debug(f"Message data: {data}")
                 
         except json_lib.JSONDecodeError as e:
             logger.error(f"Failed to parse WebSocket message as JSON: {e}")
@@ -328,8 +333,12 @@ def call_zeroclaw_ws(message: str, session_id: str, from_user: str, chat_id: str
         
         # 返回完整响应
         response = "".join(full_response).strip()
+        logger.info(f"Final response length: {len(response)} chars")
+        logger.info(f"Final response preview: {response[:200]}...")
+        
         if not response:
             response = "处理完成，但未收到响应。"
+            logger.warning("Empty response from zeroclaw")
         
         logger.info(f"Zeroclaw WebSocket response received for session {session_id}")
         return response
@@ -386,11 +395,16 @@ def async_process_message(from_user: str, chat_id: str, content: str, session_id
         # 使用 WebSocket 调用 zeroclaw
         reply = call_zeroclaw_ws(content, session_id, from_user, chat_id)
         
+        logger.info(f"Got reply from zeroclaw: {len(reply)} chars")
+        
         if not reply:
             reply = "处理完成。"
+            logger.warning("Empty reply from call_zeroclaw_ws")
         
         # 发送最终结果
+        logger.info(f"Sending final reply to user {from_user}")
         send_wecom_text(from_user, chat_id, reply)
+        logger.info(f"Final reply sent successfully")
         
     except Exception as e:
         logger.error(f"Async message processing failed: {e}", exc_info=True)
