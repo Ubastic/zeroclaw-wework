@@ -325,7 +325,9 @@ def call_zeroclaw_ws(message: str, session_id: str, from_user: str, chat_id: str
         )
         
         # 运行 WebSocket（阻塞直到连接关闭）
-        ws.run_forever(ping_interval=20, ping_timeout=10)
+        # ping_interval: 每 60 秒发送一次 ping
+        # ping_timeout: 等待 pong 的超时时间 30 秒
+        ws.run_forever(ping_interval=60, ping_timeout=30)
         
         # 停止 SSE 监听
         sse_stop_event.set()
