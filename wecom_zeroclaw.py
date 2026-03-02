@@ -284,6 +284,10 @@ def call_zeroclaw_ws(message: str, session_id: str, from_user: str, chat_id: str
                     logger.warning("Received done message without full_response")
                     logger.debug(f"Done message data: {data}")
                 
+                # 主动关闭 WebSocket 连接
+                logger.info("Closing WebSocket connection after receiving done message")
+                ws.close()
+                
             elif msg_type == "error":
                 # 错误消息
                 error_msg = data.get("message", "Unknown error")
