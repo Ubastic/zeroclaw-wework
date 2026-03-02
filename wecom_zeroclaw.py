@@ -292,6 +292,7 @@ def call_zeroclaw_ws(message: str, session_id: str, from_user: str, chat_id: str
                 # 错误消息
                 error_msg = data.get("message", "Unknown error")
                 logger.error(f"WebSocket error from zeroclaw: {error_msg}")
+                logger.error(f"Full error data: {json_lib.dumps(data, ensure_ascii=False, indent=2)}")
                 full_response.append(f"处理出错：{error_msg}")
                 
             else:

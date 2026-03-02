@@ -1,0 +1,13 @@
+# Sample ZeroClaw CLI config for custom provider
+# Path: ~/.zeroclaw/config.toml typically; placed here as an example
+
+api_key = "YOUR_API_KEY"
+default_provider = "custom:https://nan.meta-api.vip/v1"  # base URL; ZeroClaw will append /chat/completions unless already present
+default_model = "your-model-name"
+
+# Optional: force OpenAI Responses API mode (if gateway supports it)
+# provider_api = "openai-responses"
+
+# Optional: tune defaults
+# default_temperature = 0.7
+# model_support_vision = false
