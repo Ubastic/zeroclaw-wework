@@ -7,6 +7,7 @@ import struct
 import threading
 import time
 import xml.etree.ElementTree as ET
+from typing import List
 
 import requests
 import websocket
@@ -46,6 +47,12 @@ WECOM_APP_SECRET = os.getenv("WECOM_APP_SECRET", "").strip()
 
 LISTEN_HOST = os.getenv("LISTEN_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.getenv("LISTEN_PORT", "8080"))
+
+# 消息分割阈值（字节）
+# 企业微信客户端：2048 字节
+# 微信端（企业微信插件）：约 600-800 字节（实测）
+# 默认：800 字节（兼顾微信端和企业微信端）
+WECOM_MAX_MESSAGE_BYTES = int(os.getenv("WECOM_MAX_MESSAGE_BYTES", "800"))
 
 ALLOWED_USERS = {
     u.strip()
@@ -362,32 +369,140 @@ def call_zeroclaw_ws(message: str, session_id: str, from_user: str, chat_id: str
         raise
 
 
+def split_message_by_bytes(content: str, max_bytes: int = None) -> List[str]:
+    """
+    按字节数分割消息，确保每段不超过指定字节数。
+    
+    限制说明：
+    - 企业微信客户端：2048 字节
+    - 微信端（企业微信插件）：约 600-800 字节（实测）
+    - 默认：800 字节（约 266 个中文字符）
+    
+    Args:
+        content: 要分割的消息内容
+        max_bytes: 每段最大字节数（None 则使用环境变量 WECOM_MAX_MESSAGE_BYTES）
+    
+    Returns:
+        分割后的消息列表
+    """
+    if max_bytes is None:
+        max_bytes = WECOM_MAX_MESSAGE_BYTES
+    
+    if not content:
+        return [""]
+    
+    # 检查是否需要分割
+    content_bytes = content.encode('utf-8')
+    if len(content_bytes) <= max_bytes:
+        return [content]
+    
+    chunks = []
+    current_chunk = ""
+    current_bytes = 0
+    
+    # 按行分割，保持内容完整性
+    lines = content.split('\n')
+    
+    for i, line in enumerate(lines):
+        line_with_newline = line + ('\n' if i < len(lines) - 1 else '')
+        line_bytes = line_with_newline.encode('utf-8')
+        line_byte_len = len(line_bytes)
+        
+        # 如果单行就超过限制，需要按字符分割
+        if line_byte_len > max_bytes:
+            # 先保存当前块
+            if current_chunk:
+                chunks.append(current_chunk.rstrip('\n'))
+                current_chunk = ""
+                current_bytes = 0
+            
+            # 按字符分割超长行
+            temp_line = ""
+            temp_bytes = 0
+            for char in line:
+                char_bytes = char.encode('utf-8')
+                char_byte_len = len(char_bytes)
+                
+                if temp_bytes + char_byte_len > max_bytes:
+                    chunks.append(temp_line)
+                    temp_line = char
+                    temp_bytes = char_byte_len
+                else:
+                    temp_line += char
+                    temp_bytes += char_byte_len
+            
+            if temp_line:
+                current_chunk = temp_line + ('\n' if i < len(lines) - 1 else '')
+                current_bytes = len(current_chunk.encode('utf-8'))
+        
+        # 如果加上这行会超过限制，先保存当前块
+        elif current_bytes + line_byte_len > max_bytes:
+            if current_chunk:
+                chunks.append(current_chunk.rstrip('\n'))
+            current_chunk = line_with_newline
+            current_bytes = line_byte_len
+        
+        # 否则追加到当前块
+        else:
+            current_chunk += line_with_newline
+            current_bytes += line_byte_len
+    
+    # 保存最后一块
+    if current_chunk:
+        chunks.append(current_chunk.rstrip('\n'))
+    
+    return chunks if chunks else [""]
+
+
 def send_wecom_text(user_id: str, chat_id: str, content: str):
-    """发送企业微信文本消息"""
+    """
+    发送企业微信文本消息，自动处理超长消息分割。
+    企业微信限制：单条消息最大 2048 字节。
+    """
     try:
         token = get_access_token()
-        if chat_id:
-            url = f"https://qyapi.weixin.qq.com/cgi-bin/appchat/send?access_token={token}"
-            payload = {
-                "chatid": chat_id,
-                "msgtype": "text",
-                "text": {"content": content},
-            }
-        else:
-            url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={token}"
-            payload = {
-                "touser": user_id,
-                "msgtype": "text",
-                "agentid": int(WECOM_AGENT_ID),
-                "text": {"content": content},
-            }
-
-        resp = requests.post(url, json=payload, timeout=10)
-        data = resp.json()
-        if data.get("errcode") != 0:
-            logger.error(f"WeCom send failed: {data}")
-            raise RuntimeError(f"send failed: {data}")
-        logger.info(f"Message sent to user={user_id}, chat={chat_id}")
+        
+        # 分割消息
+        chunks = split_message_by_bytes(content)
+        total_chunks = len(chunks)
+        
+        # 发送每一段
+        for idx, chunk in enumerate(chunks, 1):
+            # 如果消息被分割，添加序号标记
+            if total_chunks > 1:
+                chunk_with_marker = f"[{idx}/{total_chunks}]\n{chunk}"
+            else:
+                chunk_with_marker = chunk
+            
+            # 构建请求
+            if chat_id:
+                url = f"https://qyapi.weixin.qq.com/cgi-bin/appchat/send?access_token={token}"
+                payload = {
+                    "chatid": chat_id,
+                    "msgtype": "text",
+                    "text": {"content": chunk_with_marker},
+                }
+            else:
+                url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={token}"
+                payload = {
+                    "touser": user_id,
+                    "msgtype": "text",
+                    "agentid": int(WECOM_AGENT_ID),
+                    "text": {"content": chunk_with_marker},
+                }
+            
+            # 发送请求
+            resp = requests.post(url, json=payload, timeout=10)
+            data = resp.json()
+            if data.get("errcode") != 0:
+                logger.error(f"WeCom send failed (chunk {idx}/{total_chunks}): {data}")
+                raise RuntimeError(f"send failed: {data}")
+            
+            # 多段消息之间添加短暂延迟，避免消息顺序混乱
+            if idx < total_chunks:
+                time.sleep(0.3)
+        
+        logger.info(f"Message sent to user={user_id}, chat={chat_id} ({total_chunks} chunk(s))")
     except Exception as e:
         logger.error(f"Failed to send WeCom message: {e}")
         raise

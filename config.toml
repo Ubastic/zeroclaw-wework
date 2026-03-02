@@ -3,11 +3,33 @@
 
 api_key = "YOUR_API_KEY"
 default_provider = "custom:https://nan.meta-api.vip/v1"  # base URL; ZeroClaw will append /chat/completions unless already present
-default_model = "your-model-name"
+default_model = "gpt-4o"  # 使用有效的模型名称，如 gpt-4o, gpt-4-turbo, gpt-3.5-turbo 等
 
 # Optional: force OpenAI Responses API mode (if gateway supports it)
 # provider_api = "openai-responses"
 
 # Optional: tune defaults
-# default_temperature = 0.7
+default_temperature = 0.7
 # model_support_vision = false
+
+[agent]
+# 增加最大工具调用次数限制
+# 默认值：20（旧版本可能是 10）
+# 推荐值：50-100（适合复杂任务如代码研究、多步骤分析）
+max_tool_iterations = 50
+# 可选：增加历史消息保留数量
+max_history_messages = 100
+# 可选：启用并行工具执行（加速处理）
+parallel_tools = true
+
+[gateway]
+host = "127.0.0.1"
+port = 42617
+require_pairing = false
+request_timeout_secs = 600  # 10 分钟超时，适合超大任务
+
+# 子 Agent 配置（可选）
+[subagents]
+enabled = true
+max_concurrent = 5
+auto_activate = true
