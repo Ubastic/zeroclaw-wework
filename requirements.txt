@@ -3,3 +3,4 @@ requests==2.31.0
 pycryptodome==3.19.0
 python-dotenv==1.0.0
 websocket-client==1.7.0
+sseclient-py==1.8.0

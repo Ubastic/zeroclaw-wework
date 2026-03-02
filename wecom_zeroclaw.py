@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ET
 import requests
 import websocket
 import json as json_lib
+import sseclient
 from flask import Flask, request, make_response
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
@@ -170,8 +171,72 @@ def get_access_token() -> str:
     return _token_cache["token"]
 
 
+def listen_sse_progress(from_user: str, chat_id: str, stop_event: threading.Event):
+    """监听 SSE 事件流，实时推送进度"""
+    sse_url = "http://127.0.0.1:42617/api/events"
+    headers = {}
+    if ZEROCLAW_WEBHOOK_BEARER:
+        headers["Authorization"] = f"Bearer {ZEROCLAW_WEBHOOK_BEARER}"
+    
+    try:
+        logger.info("Starting SSE listener for progress updates")
+        response = requests.get(sse_url, headers=headers, stream=True, timeout=None)
+        client = sseclient.SSEClient(response)
+        
+        for event in client.events():
+            if stop_event.is_set():
+                break
+            
+            try:
+                data = json_lib.loads(event.data)
+                event_type = data.get("type")
+                
+                if event_type == "agent_start":
+                    logger.info("Agent started")
+                    
+                elif event_type == "tool_call_start":
+                    tool = data.get("tool", "unknown")
+                    logger.info(f"Tool started: {tool}")
+                    try:
+                        send_wecom_text(from_user, chat_id, f"🔧 正在使用工具: {tool}")
+                    except:
+                        pass
+                    
+                elif event_type == "tool_call":
+                    tool = data.get("tool", "unknown")
+                    duration_ms = data.get("duration_ms", 0)
+                    success = data.get("success", True)
+                    status = "✅" if success else "❌"
+                    logger.info(f"Tool completed: {tool} ({duration_ms}ms, success={success})")
+                    try:
+                        send_wecom_text(
+                            from_user, 
+                            chat_id, 
+                            f"{status} {tool} 完成 ({duration_ms}ms)"
+                        )
+                    except:
+                        pass
+                    
+                elif event_type == "agent_end":
+                    logger.info("Agent completed")
+                    stop_event.set()
+                    break
+                    
+                elif event_type == "error":
+                    error_msg = data.get("message", "Unknown error")
+                    logger.error(f"SSE error event: {error_msg}")
+                    
+            except json_lib.JSONDecodeError:
+                logger.debug(f"Non-JSON SSE event: {event.data[:100]}")
+                
+    except Exception as e:
+        logger.error(f"SSE listener error: {e}")
+    finally:
+        logger.info("SSE listener stopped")
+
+
 def call_zeroclaw_ws(message: str, session_id: str, from_user: str, chat_id: str):
-    """使用 WebSocket 调用 Zeroclaw，支持实时进度更新"""
+    """使用 WebSocket 调用 Zeroclaw，配合 SSE 实时进度更新"""
     logger.info(f"Connecting to Zeroclaw WebSocket for session {session_id}")
     
     # 构建 WebSocket URL（带 session_id 和 token）
@@ -184,51 +249,50 @@ def call_zeroclaw_ws(message: str, session_id: str, from_user: str, chat_id: str
     if ZEROCLAW_WEBHOOK_BEARER:
         ws_url += f"&token={ZEROCLAW_WEBHOOK_BEARER}"
     
+    # 启动 SSE 监听线程
+    sse_stop_event = threading.Event()
+    sse_thread = threading.Thread(
+        target=listen_sse_progress,
+        args=(from_user, chat_id, sse_stop_event),
+        daemon=True
+    )
+    sse_thread.start()
+    
     full_response = []
-    last_update_time = time.time()
-    update_interval = 30  # 每 30 秒发送一次进度更新
     
     def on_message(ws, message):
-        nonlocal last_update_time
         try:
+            # zeroclaw WebSocket 只发送 JSON 消息
             data = json_lib.loads(message)
             msg_type = data.get("type")
             
-            if msg_type == "content":
-                # 收到内容片段
-                content = data.get("content", "")
-                if content:
-                    full_response.append(content)
-                    
-                    # 定期发送进度更新
-                    current_time = time.time()
-                    if current_time - last_update_time > update_interval:
-                        progress = "".join(full_response)
-                        if len(progress) > 100:
-                            preview = progress[:100] + "..."
-                            try:
-                                send_wecom_text(from_user, chat_id, f"[处理中] {preview}")
-                                last_update_time = current_time
-                            except:
-                                pass
-            
-            elif msg_type == "tool_use":
-                # Agent 正在使用工具
-                tool_name = data.get("tool", "unknown")
-                logger.info(f"Agent using tool: {tool_name}")
+            if msg_type == "history":
+                # 连接建立时的历史记录，忽略
+                logger.debug(f"Received history for session {session_id}")
+                
+            elif msg_type == "done":
+                # 处理完成，包含完整响应
+                logger.info(f"WebSocket conversation completed for session {session_id}")
+                final_response = data.get("full_response", "").strip()
+                if final_response:
+                    full_response.clear()
+                    full_response.append(final_response)
+                else:
+                    logger.warning("Received done message without full_response")
                 
             elif msg_type == "error":
                 # 错误消息
                 error_msg = data.get("message", "Unknown error")
-                logger.error(f"WebSocket error: {error_msg}")
-                full_response.append(f"\n[错误: {error_msg}]")
-            
-            elif msg_type == "done":
-                # 完成
-                logger.info(f"WebSocket conversation completed for session {session_id}")
+                logger.error(f"WebSocket error from zeroclaw: {error_msg}")
+                full_response.append(f"处理出错：{error_msg}")
+                
+            else:
+                # 未知消息类型
+                logger.debug(f"Received unknown message type: {msg_type}")
                 
         except json_lib.JSONDecodeError as e:
-            logger.warning(f"Failed to parse WebSocket message: {e}")
+            logger.error(f"Failed to parse WebSocket message as JSON: {e}")
+            logger.debug(f"Raw message: {message[:200]}")
     
     def on_error(ws, error):
         logger.error(f"WebSocket error: {error}")
@@ -238,8 +302,12 @@ def call_zeroclaw_ws(message: str, session_id: str, from_user: str, chat_id: str
     
     def on_open(ws):
         logger.info(f"WebSocket connected for session {session_id}")
-        # 发送消息
-        ws.send(message)
+        # 发送消息（zeroclaw 要求 JSON 格式）
+        payload = json_lib.dumps({
+            "type": "message",
+            "content": message
+        })
+        ws.send(payload)
     
     try:
         # 创建 WebSocket 连接
@@ -254,6 +322,10 @@ def call_zeroclaw_ws(message: str, session_id: str, from_user: str, chat_id: str
         # 运行 WebSocket（阻塞直到连接关闭）
         ws.run_forever(ping_interval=20, ping_timeout=10)
         
+        # 停止 SSE 监听
+        sse_stop_event.set()
+        sse_thread.join(timeout=2)
+        
         # 返回完整响应
         response = "".join(full_response).strip()
         if not response:
@@ -263,6 +335,8 @@ def call_zeroclaw_ws(message: str, session_id: str, from_user: str, chat_id: str
         return response
         
     except Exception as e:
+        # 停止 SSE 监听
+        sse_stop_event.set()
         logger.error(f"WebSocket connection failed: {e}")
         raise
 
